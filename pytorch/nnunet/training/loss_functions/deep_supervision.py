@@ -35,7 +35,8 @@ class MultipleOutputLoss2(nn.Module):
             # Modif by PL
             # weights = [1] * len(x)
             # We want the sum of the weights to be equals to 1
-            # Warning : This implementation is only relevent if we do ds. If not it will only divide the loss by len(x)
+            # Warning : This implementation is only relevent if we do ds. If not it will only divide the loss
+            # by the number of localisers you have in your architecture (deepness of the network in this case)
             weights = [1 / len(x)] * len(x)
 
         else:
