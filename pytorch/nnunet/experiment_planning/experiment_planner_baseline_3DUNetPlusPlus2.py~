@@ -12,18 +12,18 @@
 #    See the License for the specific language governing permissions and
 #    limitations under the License.
 
+# Créé par JB
+
 from copy import deepcopy
 
 import numpy as np
 from nnunet.experiment_planning.common_utils import get_pool_and_conv_props
 from nnunet.experiment_planning.experiment_planner_baseline_3DUNet import ExperimentPlanner
-from nnunet.network_architecture.generic_UNet import Generic_UNet
-# Modification par JB : ajout de Generic_UNetPlusPlus
 from nnunet.network_architecture.generic_UNetPlusPlus import Generic_UNetPlusPlus
 from nnunet.paths import *
 
 
-class ExperimentPlanner3D_v21(ExperimentPlanner):
+class ExperimentPlanner3D_UNetPlusPlus(ExperimentPlanner):
     """
     Combines ExperimentPlannerPoolBasedOnSpacing and ExperimentPlannerTargetSpacingForAnisoAxis
 
@@ -31,11 +31,11 @@ class ExperimentPlanner3D_v21(ExperimentPlanner):
     amp is A LOT faster if the number of filters is divisible by 8
     """
     def __init__(self, folder_with_cropped_data, preprocessed_output_folder):
-        super(ExperimentPlanner3D_v21, self).__init__(folder_with_cropped_data, preprocessed_output_folder)
+        super(ExperimentPlanner3D_UNetPlusPlus, self).__init__(folder_with_cropped_data, preprocessed_output_folder)
         self.data_identifier = "nnUNetData_plans_v2.1"
         self.plans_fname = join(self.preprocessed_output_folder,
                                 "nnUNetPlansv2.1_plans_3D.pkl")
-        # Modification de JB : 32 à l'origine
+        # Modification de JB
         self.unet_base_num_features = 32
         #self.unet_base_num_features = 24
         #self.unet_base_num_features = 16
@@ -122,10 +122,9 @@ class ExperimentPlanner3D_v21(ExperimentPlanner):
         # we compute as if we were using only 30 feature maps. We can do that because fp16 training is the standard
         # now. That frees up some space. The decision to go with 32 is solely due to the speedup we get (non-multiples
         # of 8 are not supported in nvidia amp)
-        # Modification par JB : anciennement, Generic_UNet utilisé
-        ref = Generic_UNet.use_this_for_batch_size_computation_3D * self.unet_base_num_features / \
-              Generic_UNet.BASE_NUM_FEATURES_3D
-        here = Generic_UNet.compute_approx_vram_consumption(new_shp, network_num_pool_per_axis,
+        ref = Generic_UNetPlusPlus.use_this_for_batch_size_computation_3D * self.unet_base_num_features / \
+              Generic_UNetPlusPlus.BASE_NUM_FEATURES_3D
+        here = Generic_UNetPlusPlus.compute_approx_vram_consumption(new_shp, network_num_pool_per_axis,
                                                             self.unet_base_num_features,
                                                             self.unet_max_num_filters, num_modalities,
                                                             num_classes,
@@ -149,8 +148,7 @@ class ExperimentPlanner3D_v21(ExperimentPlanner):
                                                                  self.unet_max_numpool,
                                                                  )
 
-            # Modification par JB : anciennement, Generic_UNet utilisé
-            here = Generic_UNet.compute_approx_vram_consumption(new_shp, network_num_pool_per_axis,
+            here = Generic_UNetPlusPlus.compute_approx_vram_consumption(new_shp, network_num_pool_per_axis,
                                                                 self.unet_base_num_features,
                                                                 self.unet_max_num_filters, num_modalities,
                                                                 num_classes, pool_op_kernel_sizes,
@@ -159,8 +157,7 @@ class ExperimentPlanner3D_v21(ExperimentPlanner):
         #print(here, ref)
 
         input_patch_size = new_shp
-        
-        # Modification par JB : anciennement, Generic_UNet utilisé
+
         batch_size = Generic_UNetPlusPlus.DEFAULT_BATCH_SIZE_3D  # This is what wirks with 128**3
         batch_size = int(np.floor(max(ref / here, 1) * batch_size))
 

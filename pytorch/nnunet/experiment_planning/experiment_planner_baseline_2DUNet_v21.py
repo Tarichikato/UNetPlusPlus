@@ -16,6 +16,8 @@
 from nnunet.experiment_planning.common_utils import get_pool_and_conv_props
 from nnunet.experiment_planning.experiment_planner_baseline_2DUNet import ExperimentPlanner2D
 from nnunet.network_architecture.generic_UNet import Generic_UNet
+# Ajout par JB
+from nnunet.network_architecture.generic_UNetPlusPlus import Generic_UNetPlusPlus
 from nnunet.paths import *
 import numpy as np
 
@@ -51,8 +53,8 @@ class ExperimentPlanner2D_v21(ExperimentPlanner2D):
                                                                                      num_modalities, num_classes,
                                                                                      net_pool_kernel_sizes,
                                                                                      conv_per_stage=self.conv_per_stage)
-        batch_size = int(np.floor(Generic_UNet.use_this_for_batch_size_computation_2D /
-                                  estimated_gpu_ram_consumption * Generic_UNet.DEFAULT_BATCH_SIZE_2D))
+        batch_size = int(np.floor(Generic_UNetPlusPlus.use_this_for_batch_size_computation_2D /
+                                  estimated_gpu_ram_consumption * Generic_UNetPlusPlus.DEFAULT_BATCH_SIZE_2D))
         if batch_size < self.unet_min_batch_size:
             raise RuntimeError("This framework is not made to process patches this large. We will add patch-based "
                                "2D networks later. Sorry for the inconvenience")

@@ -12,6 +12,7 @@
 #    See the License for the specific language governing permissions and
 #    limitations under the License.
 
+# Version avec suppression possible du dernier niveau et personnalisation du nombre de features par niveau de résolution
 
 from copy import deepcopy
 from nnunet.utilities.nd_softmax import softmax_helper
@@ -164,10 +165,10 @@ class Upsample(nn.Module):
                                          align_corners=self.align_corners)
 
 
-class Generic_UNetPlusPlus(SegmentationNetwork):
+class Generic_UNetPlusPlus3(SegmentationNetwork):
     # Modification par JB
-    DEFAULT_BATCH_SIZE_3D = 2
-    # DEFAULT_BATCH_SIZE_3D = 1
+    # DEFAULT_BATCH_SIZE_3D = 2
+    DEFAULT_BATCH_SIZE_3D = 1
     DEFAULT_PATCH_SIZE_3D = (64, 192, 160)
     SPACING_FACTOR_BETWEEN_STAGES = 2
     BASE_NUM_FEATURES_3D = 30
@@ -176,21 +177,20 @@ class Generic_UNetPlusPlus(SegmentationNetwork):
     MAX_NUM_FILTERS_3D = 320
     # MAX_NUM_FILTERS_3D = 288
     # MAX_NUM_FILTERS_3D = 256
-    # MAX_NUM_FILTERS_3D = 512
 
     DEFAULT_PATCH_SIZE_2D = (256, 256)
     BASE_NUM_FEATURES_2D = 30
-    # Modification par JB : initialement, 50
-    #DEFAULT_BATCH_SIZE_2D = 50
-    DEFAULT_BATCH_SIZE_2D = 64
+    DEFAULT_BATCH_SIZE_2D = 50
     MAX_NUMPOOL_2D = 999
     MAX_FILTERS_2D = 480
 
     use_this_for_batch_size_computation_2D = 19739648
     # Modification par JB : initialement, 520000000 * 2
-    use_this_for_batch_size_computation_3D = 520000000 * 2  # 505789440
-    # use_this_for_batch_size_computation_3D = 520000000  # 505789440
+    #use_this_for_batch_size_computation_3D = 520000000 * 2  # 505789440
+    use_this_for_batch_size_computation_3D = 520000000  # 505789440
 
+    # Ajout par JB : permet d'utiliser ou non le niveau le plus profond de l'architecture
+    # Ajout par JB : permet de personnaliser le nombre de features par niveau de résolution
     def __init__(self, input_channels, base_num_features, num_classes, num_pool, num_conv_per_stage=2,
                  feat_map_mul_on_downscale=2, conv_op=nn.Conv2d,
                  norm_op=nn.BatchNorm2d, norm_op_kwargs=None,
@@ -200,7 +200,7 @@ class Generic_UNetPlusPlus(SegmentationNetwork):
                  conv_kernel_sizes=None,
                  upscale_logits=False, convolutional_pooling=False, convolutional_upsampling=False,
                  max_num_features=None, basic_block=ConvDropoutNormNonlin,
-                 seg_output_use_bias=False):
+                 seg_output_use_bias=False, use_last_level=False, use_customized_nb_features = True):
         """
         basically more flexible than v1, architecture is the same
 
@@ -210,7 +210,7 @@ class Generic_UNetPlusPlus(SegmentationNetwork):
 
         Questions? -> f.isensee@dkfz.de
         """
-        super(Generic_UNetPlusPlus, self).__init__()
+        super(Generic_UNetPlusPlus3, self).__init__()
         self.convolutional_upsampling = convolutional_upsampling
         self.convolutional_pooling = convolutional_pooling
         self.upscale_logits = upscale_logits
@@ -235,6 +235,10 @@ class Generic_UNetPlusPlus(SegmentationNetwork):
         self.final_nonlin = final_nonlin
         self._deep_supervision = deep_supervision
         self.do_ds = deep_supervision
+        # Ajout par JB
+        self.use_last_level = use_last_level
+        self.use_customized_nb_features = use_customized_nb_features
+
 
         if conv_op == nn.Conv2d:
             upsample_mode = 'bilinear'
@@ -273,13 +277,19 @@ class Generic_UNetPlusPlus(SegmentationNetwork):
 
         self.conv_blocks_context = []
         # self.conv_blocks_localization = []
-        self.loc0 = []
+        # Modification par JB
+        if use_last_level:
+            self.loc0 = []
+        #self.loc0 = []
         self.loc1 = []
         self.loc2 = []
         self.loc3 = []
         self.loc4 = []
         self.td = []
-        self.up0 = []
+        # Modification par JB
+        if use_last_level:
+            self.up0 = []
+        #self.up0 = []
         self.up1 = []
         self.up2 = []
         self.up3 = []
@@ -290,27 +300,83 @@ class Generic_UNetPlusPlus(SegmentationNetwork):
         output_features = base_num_features
         input_features = input_channels
 
-        for d in range(num_pool):
-            # determine the first stride
-            if d != 0 and self.convolutional_pooling:
-                first_stride = pool_op_kernel_sizes[d - 1]
+        # Ajout par JB
+        self.nb_features = []
+
+        # Ajout par JB
+        if self.use_customized_nb_features:
+            if self.use_last_level:
+                self.nb_features = [64, 128, 256, 512, 1024] # Liste contenant le nombre de features pour chaque niveau (réseau à 6 niveaux) sauf le premier qui est donné par base_num_features dans l'experiment planner
             else:
-                first_stride = None
+                self.nb_features = [64, 128, 256, 512] # Liste contenant le nombre de features pour chaque niveau (réseau à 5 niveaux) sauf le premier qui est donné par base_num_features dans l'experiment planner
+            
+            for d in range(num_pool):
+                # determine the first stride
+                if d != 0 and self.convolutional_pooling:
+                    first_stride = pool_op_kernel_sizes[d - 1]
+                else:
+                    first_stride = None
+                    
+                self.conv_kwargs['kernel_size'] = self.conv_kernel_sizes[d]
+                self.conv_kwargs['padding'] = self.conv_pad_sizes[d]
+                # add convolutions
+                self.conv_blocks_context.append(StackedConvLayers(input_features, output_features, num_conv_per_stage,
+                                                                  self.conv_op, self.conv_kwargs, self.norm_op,
+                                                                  self.norm_op_kwargs, self.dropout_op,
+                                                                  self.dropout_op_kwargs, self.nonlin, self.nonlin_kwargs,
+                                                                  first_stride, basic_block=basic_block))
+                if not self.convolutional_pooling:
+                    self.td.append(pool_op(pool_op_kernel_sizes[d]))
+                input_features = output_features
+                # Modification par JB : mise en commentaire et obtention de output_features à partir de nb_features
+                # output_features = int(np.round(output_features * feat_map_mul_on_downscale))
+                output_features = self.nb_features[d]
+                        
+                output_features = min(output_features, self.max_num_features)
+        else:
+            for d in range(num_pool):
+                # determine the first stride
+                if d != 0 and self.convolutional_pooling:
+                    first_stride = pool_op_kernel_sizes[d - 1]
+                else:
+                    first_stride = None
+                    
+                self.conv_kwargs['kernel_size'] = self.conv_kernel_sizes[d]
+                self.conv_kwargs['padding'] = self.conv_pad_sizes[d]
+                # add convolutions
+                self.conv_blocks_context.append(StackedConvLayers(input_features, output_features, num_conv_per_stage,
+                                                                  self.conv_op, self.conv_kwargs, self.norm_op,
+                                                                  self.norm_op_kwargs, self.dropout_op,
+                                                                  self.dropout_op_kwargs, self.nonlin, self.nonlin_kwargs,
+                                                                  first_stride, basic_block=basic_block))
+                if not self.convolutional_pooling:
+                    self.td.append(pool_op(pool_op_kernel_sizes[d]))
+                input_features = output_features
+                output_features = int(np.round(output_features * feat_map_mul_on_downscale))
+                        
+                output_features = min(output_features, self.max_num_features)
+        
+        # for d in range(num_pool):
+            # determine the first stride
+        #    if d != 0 and self.convolutional_pooling:
+        #        first_stride = pool_op_kernel_sizes[d - 1]
+        #    else:
+        #        first_stride = None
 
-            self.conv_kwargs['kernel_size'] = self.conv_kernel_sizes[d]
-            self.conv_kwargs['padding'] = self.conv_pad_sizes[d]
+        #    self.conv_kwargs['kernel_size'] = self.conv_kernel_sizes[d]
+        #    self.conv_kwargs['padding'] = self.conv_pad_sizes[d]
             # add convolutions
-            self.conv_blocks_context.append(StackedConvLayers(input_features, output_features, num_conv_per_stage,
-                                                              self.conv_op, self.conv_kwargs, self.norm_op,
-                                                              self.norm_op_kwargs, self.dropout_op,
-                                                              self.dropout_op_kwargs, self.nonlin, self.nonlin_kwargs,
-                                                              first_stride, basic_block=basic_block))
-            if not self.convolutional_pooling:
-                self.td.append(pool_op(pool_op_kernel_sizes[d]))
-            input_features = output_features
-            output_features = int(np.round(output_features * feat_map_mul_on_downscale))
-
-            output_features = min(output_features, self.max_num_features)
+        #    self.conv_blocks_context.append(StackedConvLayers(input_features, output_features, num_conv_per_stage,
+        #                                                      self.conv_op, self.conv_kwargs, self.norm_op,
+        #                                                      self.norm_op_kwargs, self.dropout_op,
+        #                                                      self.dropout_op_kwargs, self.nonlin, self.nonlin_kwargs,
+        #                                                      first_stride, basic_block=basic_block))
+        #    if not self.convolutional_pooling:
+        #        self.td.append(pool_op(pool_op_kernel_sizes[d]))
+        #    input_features = output_features
+        #    output_features = int(np.round(output_features * feat_map_mul_on_downscale))
+        #
+        #    output_features = min(output_features, self.max_num_features)
 
         # now the bottleneck.
         # determine the first stride
@@ -344,27 +410,70 @@ class Generic_UNetPlusPlus(SegmentationNetwork):
 
         # now lets build the localization pathway
         encoder_features = final_num_features
-        self.loc0, self.up0, encoder_features = self.create_nest(0, num_pool, final_num_features, num_conv_per_stage,
-                                                                 basic_block, transpconv)
-        self.loc1, self.up1, encoder_features1 = self.create_nest(1, num_pool, encoder_features, num_conv_per_stage,
-                                                                  basic_block, transpconv)
-        self.loc2, self.up2, encoder_features2 = self.create_nest(2, num_pool, encoder_features1, num_conv_per_stage,
-                                                                  basic_block, transpconv)
-        self.loc3, self.up3, encoder_features3 = self.create_nest(3, num_pool, encoder_features2, num_conv_per_stage,
-                                                                  basic_block, transpconv)
-        self.loc4, self.up4, encoder_features4 = self.create_nest(4, num_pool, encoder_features3, num_conv_per_stage,
-                                                                  basic_block, transpconv)
+        # Ajout par JB
+        if self.use_last_level:
+            self.loc0, self.up0, encoder_features = self.create_nest(0, num_pool, final_num_features, num_conv_per_stage,
+                                                                     basic_block, transpconv)
+            self.loc1, self.up1, encoder_features1 = self.create_nest(1, num_pool, encoder_features, num_conv_per_stage,
+                                                                      basic_block, transpconv)
+            self.loc2, self.up2, encoder_features2 = self.create_nest(2, num_pool, encoder_features1, num_conv_per_stage,
+                                                                      basic_block, transpconv)
+            self.loc3, self.up3, encoder_features3 = self.create_nest(3, num_pool, encoder_features2, num_conv_per_stage,
+                                                                      basic_block, transpconv)
+            self.loc4, self.up4, encoder_features4 = self.create_nest(4, num_pool, encoder_features3, num_conv_per_stage,
+                                                                      basic_block, transpconv)
 
-        self.seg_outputs.append(conv_op(self.loc0[-1][-1].output_channels, num_classes,
-                                        1, 1, 0, 1, 1, seg_output_use_bias))
-        self.seg_outputs.append(conv_op(self.loc1[-1][-1].output_channels, num_classes,
-                                        1, 1, 0, 1, 1, seg_output_use_bias))
-        self.seg_outputs.append(conv_op(self.loc2[-1][-1].output_channels, num_classes,
-                                        1, 1, 0, 1, 1, seg_output_use_bias))
-        self.seg_outputs.append(conv_op(self.loc3[-1][-1].output_channels, num_classes,
-                                        1, 1, 0, 1, 1, seg_output_use_bias))
-        self.seg_outputs.append(conv_op(self.loc4[-1][-1].output_channels, num_classes,
-                                        1, 1, 0, 1, 1, seg_output_use_bias))
+            self.seg_outputs.append(conv_op(self.loc0[-1][-1].output_channels, num_classes,
+                                            1, 1, 0, 1, 1, seg_output_use_bias))
+            self.seg_outputs.append(conv_op(self.loc1[-1][-1].output_channels, num_classes,
+                                            1, 1, 0, 1, 1, seg_output_use_bias))
+            self.seg_outputs.append(conv_op(self.loc2[-1][-1].output_channels, num_classes,
+                                            1, 1, 0, 1, 1, seg_output_use_bias))
+            self.seg_outputs.append(conv_op(self.loc3[-1][-1].output_channels, num_classes,
+                                            1, 1, 0, 1, 1, seg_output_use_bias))
+            self.seg_outputs.append(conv_op(self.loc4[-1][-1].output_channels, num_classes,
+                                            1, 1, 0, 1, 1, seg_output_use_bias))
+        else:
+            self.loc1, self.up1, encoder_features1 = self.create_nest(1, num_pool, final_num_features, num_conv_per_stage,
+                                                                      basic_block, transpconv)
+            self.loc2, self.up2, encoder_features2 = self.create_nest(2, num_pool, encoder_features1, num_conv_per_stage,
+                                                                      basic_block, transpconv)
+            self.loc3, self.up3, encoder_features3 = self.create_nest(3, num_pool, encoder_features2, num_conv_per_stage,
+                                                                      basic_block, transpconv)
+            self.loc4, self.up4, encoder_features4 = self.create_nest(4, num_pool, encoder_features3, num_conv_per_stage,
+                                                                      basic_block, transpconv)
+
+            self.seg_outputs.append(conv_op(self.loc1[-1][-1].output_channels, num_classes,
+                                            1, 1, 0, 1, 1, seg_output_use_bias))
+            self.seg_outputs.append(conv_op(self.loc2[-1][-1].output_channels, num_classes,
+                                            1, 1, 0, 1, 1, seg_output_use_bias))
+            self.seg_outputs.append(conv_op(self.loc3[-1][-1].output_channels, num_classes,
+                                            1, 1, 0, 1, 1, seg_output_use_bias))
+            self.seg_outputs.append(conv_op(self.loc4[-1][-1].output_channels, num_classes,
+                                            1, 1, 0, 1, 1, seg_output_use_bias))
+
+        
+        #self.loc0, self.up0, encoder_features = self.create_nest(0, num_pool, final_num_features, num_conv_per_stage,
+        #                                                         basic_block, transpconv)
+        #self.loc1, self.up1, encoder_features1 = self.create_nest(1, num_pool, encoder_features, num_conv_per_stage,
+        #                                                          basic_block, transpconv)
+        #self.loc2, self.up2, encoder_features2 = self.create_nest(2, num_pool, encoder_features1, num_conv_per_stage,
+        #                                                          basic_block, transpconv)
+        #self.loc3, self.up3, encoder_features3 = self.create_nest(3, num_pool, encoder_features2, num_conv_per_stage,
+        #                                                          basic_block, transpconv)
+        #self.loc4, self.up4, encoder_features4 = self.create_nest(4, num_pool, encoder_features3, num_conv_per_stage,
+        #                                                          basic_block, transpconv)
+
+        #self.seg_outputs.append(conv_op(self.loc0[-1][-1].output_channels, num_classes,
+        #                                1, 1, 0, 1, 1, seg_output_use_bias))
+        #self.seg_outputs.append(conv_op(self.loc1[-1][-1].output_channels, num_classes,
+        #                                1, 1, 0, 1, 1, seg_output_use_bias))
+        #self.seg_outputs.append(conv_op(self.loc2[-1][-1].output_channels, num_classes,
+        #                                1, 1, 0, 1, 1, seg_output_use_bias))
+        #self.seg_outputs.append(conv_op(self.loc3[-1][-1].output_channels, num_classes,
+        #                                1, 1, 0, 1, 1, seg_output_use_bias))
+        #self.seg_outputs.append(conv_op(self.loc4[-1][-1].output_channels, num_classes,
+        #                                1, 1, 0, 1, 1, seg_output_use_bias))
 
         self.upscale_logits_ops = []
         cum_upsample = np.cumprod(np.vstack(pool_op_kernel_sizes), axis=0)[::-1]
@@ -380,14 +489,20 @@ class Generic_UNetPlusPlus(SegmentationNetwork):
 
         # register all modules properly
         # self.conv_blocks_localization = nn.ModuleList(self.conv_blocks_localization)
-        self.loc0 = nn.ModuleList(self.loc0)
+        # Modification par JB
+        if self.use_last_level:
+            self.loc0 = nn.ModuleList(self.loc0)
+        #self.loc0 = nn.ModuleList(self.loc0)
         self.loc1 = nn.ModuleList(self.loc1)
         self.loc2 = nn.ModuleList(self.loc2)
         self.loc3 = nn.ModuleList(self.loc3)
         self.loc4 = nn.ModuleList(self.loc4)
         self.conv_blocks_context = nn.ModuleList(self.conv_blocks_context)
         self.td = nn.ModuleList(self.td)
-        self.up0 = nn.ModuleList(self.up0)
+        # Modification par JB
+        if self.use_last_level:
+            self.up0 = nn.ModuleList(self.up0)
+        #self.up0 = nn.ModuleList(self.up0)
         self.up1 = nn.ModuleList(self.up1)
         self.up2 = nn.ModuleList(self.up2)
         self.up3 = nn.ModuleList(self.up3)
@@ -401,7 +516,7 @@ class Generic_UNetPlusPlus(SegmentationNetwork):
             self.apply(self.weightInitializer)
             # self.apply(print_module_training_status)
 
-    def forward(self, x):
+    def forward(self, x):        
         # skips = []
         seg_outputs = []
         x0_0 = self.conv_blocks_context[0](x)
@@ -427,13 +542,23 @@ class Generic_UNetPlusPlus(SegmentationNetwork):
         x0_4 = self.loc1[3](torch.cat([x0_0, x0_1, x0_2, x0_3, self.up1[3](x1_3)], 1))
         seg_outputs.append(self.final_nonlin(self.seg_outputs[-4](x0_4)))
 
-        x5_0 = self.conv_blocks_context[5](x4_0)
-        x4_1 = self.loc0[0](torch.cat([x4_0, self.up0[0](x5_0)], 1))
-        x3_2 = self.loc0[1](torch.cat([x3_0, x3_1, self.up0[1](x4_1)], 1))
-        x2_3 = self.loc0[2](torch.cat([x2_0, x2_1, x2_2, self.up0[2](x3_2)], 1))
-        x1_4 = self.loc0[3](torch.cat([x1_0, x1_1, x1_2, x1_3, self.up0[3](x2_3)], 1))
-        x0_5 = self.loc0[4](torch.cat([x0_0, x0_1, x0_2, x0_3, x0_4, self.up0[4](x1_4)], 1))
-        seg_outputs.append(self.final_nonlin(self.seg_outputs[-5](x0_5)))
+        # Modification par JB
+        if self.use_last_level:
+            x5_0 = self.conv_blocks_context[5](x4_0)
+            x4_1 = self.loc0[0](torch.cat([x4_0, self.up0[0](x5_0)], 1))
+            x3_2 = self.loc0[1](torch.cat([x3_0, x3_1, self.up0[1](x4_1)], 1))
+            x2_3 = self.loc0[2](torch.cat([x2_0, x2_1, x2_2, self.up0[2](x3_2)], 1))
+            x1_4 = self.loc0[3](torch.cat([x1_0, x1_1, x1_2, x1_3, self.up0[3](x2_3)], 1))
+            x0_5 = self.loc0[4](torch.cat([x0_0, x0_1, x0_2, x0_3, x0_4, self.up0[4](x1_4)], 1))
+            seg_outputs.append(self.final_nonlin(self.seg_outputs[-5](x0_5)))
+            
+        #x5_0 = self.conv_blocks_context[5](x4_0)
+        #x4_1 = self.loc0[0](torch.cat([x4_0, self.up0[0](x5_0)], 1))
+        #x3_2 = self.loc0[1](torch.cat([x3_0, x3_1, self.up0[1](x4_1)], 1))
+        #x2_3 = self.loc0[2](torch.cat([x2_0, x2_1, x2_2, self.up0[2](x3_2)], 1))
+        #x1_4 = self.loc0[3](torch.cat([x1_0, x1_1, x1_2, x1_3, self.up0[3](x2_3)], 1))
+        #x0_5 = self.loc0[4](torch.cat([x0_0, x0_1, x0_2, x0_3, x0_4, self.up0[4](x1_4)], 1))
+        #seg_outputs.append(self.final_nonlin(self.seg_outputs[-5](x0_5)))
 
         if self._deep_supervision and self.do_ds:
             return tuple([seg_outputs[-1]] + [i(j) for i, j in

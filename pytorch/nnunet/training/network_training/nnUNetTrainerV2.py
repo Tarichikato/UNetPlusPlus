@@ -45,8 +45,13 @@ class nnUNetTrainerV2(nnUNetTrainer):
                  unpack_data=True, deterministic=True, fp16=False):
         super().__init__(plans_file, fold, output_folder, dataset_directory, batch_dice, stage, unpack_data,
                          deterministic, fp16)
-        self.max_num_epochs = 1000
-        self.initial_lr = 1e-2
+        # Modification par JB
+        # self.max_num_epochs = 1000
+        self.max_num_epochs = 500
+        # Modification par JB
+        # self.initial_lr = 1e-2
+        self.initial_lr = 1e-4
+        self.weight_decay = 1e-5 # Modification par JB
         self.deep_supervision_scales = None
         self.ds_loss_weights = None
 
@@ -84,8 +89,8 @@ class nnUNetTrainerV2(nnUNetTrainer):
             mask = np.array([True] + [True if i < net_numpool - 1 else False for i in range(1, net_numpool)])
             weights[~mask] = 0
             weights = weights / weights.sum()
-            #self.ds_loss_weights = weights
-            self.ds_loss_weights = None
+            self.ds_loss_weights = weights  # Modification par JB : initially commented
+            #self.ds_loss_weights = None  # Modification par JB : initially uncommented
             # now wrap the loss
             self.loss = MultipleOutputLoss2(self.loss, self.ds_loss_weights)
             ################# END ###################
@@ -164,8 +169,10 @@ class nnUNetTrainerV2(nnUNetTrainer):
         assert self.network is not None, "self.initialize_network must be called first"
         print('weight_decay: ', self.weight_decay)
         sys.stdout.flush()
-        self.optimizer = torch.optim.SGD(self.network.parameters(), self.initial_lr, weight_decay=self.weight_decay,
-                                         momentum=0.99, nesterov=True)
+        # Modification par JB
+        # self.optimizer = torch.optim.SGD(self.network.parameters(), self.initial_lr, weight_decay=self.weight_decay,
+        #                                 momentum=0.99, nesterov=True)
+        self.optimizer = torch.optim.Adam(self.network.parameters(), self.initial_lr, weight_decay=self.weight_decay, amsgrad=True)
         self.lr_scheduler = None
 
     def run_online_evaluation(self, output, target):
@@ -177,7 +184,7 @@ class nnUNetTrainerV2(nnUNetTrainer):
         :return:
         """
         target = target[0]
-        output = output[-1]
+        output = output[0]      # Modification par JB : initially output[-1]
         return super().run_online_evaluation(output, target)
 
     def validate(self, do_mirroring: bool = True, use_sliding_window: bool = True,

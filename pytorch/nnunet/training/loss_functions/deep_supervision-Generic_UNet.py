@@ -32,20 +32,12 @@ class MultipleOutputLoss2(nn.Module):
         assert isinstance(x, (tuple, list)), "x must be either tuple or list"
         assert isinstance(y, (tuple, list)), "y must be either tuple or list"
         if self.weight_factors is None:
-            # Modif by PL
-            # weights = [1] * len(x)
-            # We want the sum of the weights to be equals to 1
-            # Warning : This implementation is only relevent if we do ds. If not it will only divide the loss by len(x)
-            weights = [1 / len(x)] * len(x)
-
+            weights = [1] * len(x)
         else:
             weights = self.weight_factors
 
-        # Modif by PL
-        # l = weights[0] * self.loss(x[0], y[0])
-        #Deep supervision with the localisers output
-        l = 0
-        for i in range(0, len(x)):
+        l = weights[0] * self.loss(x[0], y[0])
+        for i in range(1, len(x)):
             if weights[i] != 0:
-                l += weights[i] * self.loss(x[i], y[0])
+                l += weights[i] * self.loss(x[i], y[i])
         return l
