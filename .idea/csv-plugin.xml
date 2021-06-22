@@ -3,7 +3,21 @@
   <component name="CsvFileAttributes">
     <option name="attributeMap">
       <map>
+        <entry key="\pytorch\nnunet\network_architecture\generic_UNetPlusPlus.py">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
         <entry key="\pytorch\nnunet\network_architecture\generic_modular_UNetPlusPlus.py">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="\pytorch\nnunet\network_architecture\generic_modular_UNetPlusPlus_V2.py">
           <value>
             <Attribute>
               <option name="separator" value="," />

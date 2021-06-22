@@ -22,6 +22,10 @@ from torch import nn
 import numpy as np
 from torch.optim import SGD
 
+"""L'idée dans cette version de modular unetPlusPlus est d'avoir une classe décodeur qui définie un localiser
+et qu'on appelle plusieures fois (autant de fois que le réseau est profond) en commencant par le moins profond"""
+
+
 """
 The idea behind this modular U-net ist that we decouple encoder and decoder and thus make things a) a lot more easy to 
 combine and b) enable easy swapping between segmentation or classification mode of the same architecture
