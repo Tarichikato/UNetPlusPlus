@@ -14,7 +14,7 @@
 
 
 import torch
-from nnunet.network_architecture.custom_modules.conv_blocks import StackedConvLayers
+from nnunet.network_architecture.custom_modules.conv_blocks import StackedConvLayers, BasicResidualBlock, ResidualLayer
 from nnunet.network_architecture.generic_UNet import Upsample
 from nnunet.network_architecture.neural_network import SegmentationNetwork
 from nnunet.training.loss_functions.dice_loss import DC_and_CE_loss
@@ -29,6 +29,59 @@ from torch.optim import SGD
 The idea behind this modular U-net ist that we decouple encoder and decoder and thus make things a) a lot more easy to 
 combine and b) enable easy swapping between segmentation or classification mode of the same architecture
 """
+
+
+class ConvDropoutNormNonlin(nn.Module):
+    """
+    fixes a bug in ConvDropoutNormNonlin where lrelu was used regardless of nonlin. Bad.
+    """
+
+    def __init__(self, input_channels, output_channels,
+                 conv_op=nn.Conv2d, conv_kwargs=None,
+                 norm_op=nn.BatchNorm2d, norm_op_kwargs=None,
+                 dropout_op=nn.Dropout2d, dropout_op_kwargs=None,
+                 nonlin=nn.LeakyReLU, nonlin_kwargs=None):
+        super(ConvDropoutNormNonlin, self).__init__()
+        if nonlin_kwargs is None:
+            nonlin_kwargs = {'negative_slope': 1e-2, 'inplace': True}
+        if dropout_op_kwargs is None:
+            dropout_op_kwargs = {'p': 0.5, 'inplace': True}
+        if norm_op_kwargs is None:
+            norm_op_kwargs = {'eps': 1e-5, 'affine': True, 'momentum': 0.1}
+        if conv_kwargs is None:
+            conv_kwargs = {'kernel_size': 3, 'stride': 1, 'padding': 1, 'dilation': 1, 'bias': True}
+
+        self.nonlin_kwargs = nonlin_kwargs
+        self.nonlin = nonlin
+        self.dropout_op = dropout_op
+        self.dropout_op_kwargs = dropout_op_kwargs
+        self.norm_op_kwargs = norm_op_kwargs
+        self.conv_kwargs = conv_kwargs
+        self.conv_op = conv_op
+        self.norm_op = norm_op
+
+        self.conv = self.conv_op(input_channels, output_channels, **self.conv_kwargs)
+        if self.dropout_op is not None and self.dropout_op_kwargs['p'] is not None and self.dropout_op_kwargs[
+            'p'] > 0:
+            self.dropout = self.dropout_op(**self.dropout_op_kwargs)
+        else:
+            self.dropout = None
+        self.instnorm = self.norm_op(output_channels, **self.norm_op_kwargs)
+        self.lrelu = self.nonlin(**self.nonlin_kwargs)
+
+    def forward(self, x):
+        x = self.conv(x)
+        if self.dropout is not None:
+            x = self.dropout(x)
+        return self.lrelu(self.instnorm(x))
+
+
+class ConvDropoutNonlinNorm(ConvDropoutNormNonlin):
+    def forward(self, x):
+        x = self.conv(x)
+        if self.dropout is not None:
+            x = self.dropout(x)
+        return self.instnorm(self.lrelu(x))
 
 
 def get_default_network_config(dim=2, dropout_p=None, nonlin="LeakyReLU", norm_type="bn"):
@@ -81,9 +134,7 @@ def get_default_network_config(dim=2, dropout_p=None, nonlin="LeakyReLU", norm_t
     return props
 
 
-
-class PlainConvUNetPlusPlusEncoder(nn.Module):
-
+class UNetPlusPlusEncoder(nn.Module):
     # Modification par JB
     DEFAULT_BATCH_SIZE_3D = 2
     # DEFAULT_BATCH_SIZE_3D = 1
@@ -111,9 +162,9 @@ class PlainConvUNetPlusPlusEncoder(nn.Module):
 
     # use_this_for_batch_size_computation_3D = 520000000  # 505789440
 
-
     def __init__(self, input_channels, base_num_features, num_blocks_per_stage, feat_map_mul_on_downscale,
-                 pool_op_kernel_sizes, conv_kernel_sizes, props, default_return_skips=True,
+                 pool_op_kernel_sizes, conv_kernel_sizes, props, residual=False, residual_block=BasicResidualBlock,
+                 conv_basic_block=ConvDropoutNormNonlin, default_return_skips=True,
                  max_num_features=480):
         """
         Following UNet building blocks can be added by utilizing the properties this class exposes (TODO)
@@ -128,11 +179,11 @@ class PlainConvUNetPlusPlusEncoder(nn.Module):
         :param conv_kernel_sizes:
         :param props:
         """
-        super(PlainConvUNetPlusPlusEncoder, self).__init__()
+        super(UNetPlusPlusEncoder, self).__init__()
 
         self.default_return_skips = default_return_skips
         self.props = props
-
+        self.residual = residual
         self.stages = []
         self.stage_output_features = []
         self.stage_pool_kernel_size = []
@@ -149,15 +200,29 @@ class PlainConvUNetPlusPlusEncoder(nn.Module):
 
         self.num_blocks_per_stage = num_blocks_per_stage  # decoder may need this
 
-        current_input_features = input_channels
+        if self.residual:
+            current_input_features = base_num_features
+        else:
+            current_input_features = input_channels
+
         for stage in range(num_stages):
-            current_output_features = min(int(base_num_features * feat_map_mul_on_downscale ** stage), max_num_features)
+            if self.residual:  # Ce if ne sert probablememtn à rien mais par excès de précaution je le met pour l'instant
+                current_output_features = min(base_num_features * feat_map_mul_on_downscale ** stage, max_num_features)
+            else:
+                current_output_features = min(int(base_num_features * feat_map_mul_on_downscale ** stage),
+                                              max_num_features)
+
             current_kernel_size = conv_kernel_sizes[stage]
             current_pool_kernel_size = pool_op_kernel_sizes[stage]
 
-            current_stage = StackedConvLayers(current_input_features, current_output_features, current_kernel_size,
-                                              props, num_blocks_per_stage[stage], current_pool_kernel_size)
+            if self.residual:
+                current_stage = ResidualLayer(current_input_features, current_output_features, current_kernel_size,
+                                              props, self.num_blocks_per_stage[stage], current_pool_kernel_size,
+                                              block=residual_block)
 
+            else:
+                current_stage = StackedConvLayers(current_input_features, current_output_features, current_kernel_size,
+                                                  props, num_blocks_per_stage[stage], current_pool_kernel_size)
             self.stages.append(current_stage)
             self.stage_output_features.append(current_output_features)
             self.stage_conv_op_kernel_size.append(current_kernel_size)
@@ -176,6 +241,9 @@ class PlainConvUNetPlusPlusEncoder(nn.Module):
         :return:
         """
         skips = []
+
+        if self.residual:
+            x = self.initial_nonlin(self.initial_norm(self.initial_conv(x)))
 
         for s in self.stages:
             x = s(x)
@@ -212,13 +280,18 @@ class PlainConvUNetPlusPlusEncoder(nn.Module):
         return tmp * batch_size
 
 
-class PlainConvUNetPlusPlusDecoder(nn.Module):
-    #TODO Gerer les blocs
-    def __init__(self, previous,input_channels, base_num_features, num_classes,num_pool, num_blocks_per_stage=None, network_props=None, deep_supervision=False,
-                 upscale_logits=False,max_num_features=None,basic_block=ConvDropoutNormNonlin,seg_output_use_bias=False):
-        super(PlainConvUNetPlusPlusDecoder, self).__init__()
+class UNetPlusPlusDecoder(nn.Module):
+    def __init__(self, previous, input_channels, base_num_features, num_classes, num_pool, num_blocks_per_stage=None,
+                 network_props=None, deep_supervision=False,
+                 upscale_logits=False, max_num_features=None, residual=False, residual_block=BasicResidualBlock,
+                 conv_basic_block=ConvDropoutNormNonlin, seg_output_use_bias=False):
+        super(UNetPlusPlusDecoder, self).__init__()
         self.num_classes = num_classes
         self.deep_supervision = deep_supervision
+        self.residual = residual
+        self.residual_block = residual_block
+        self.conv_basic_block = conv_basic_block
+
         """
         We assume the bottleneck is part of the encoder, so we can start with upsample -> concat here
         """
@@ -254,7 +327,6 @@ class PlainConvUNetPlusPlusDecoder(nn.Module):
         for krnl in self.conv_kernel_sizes:
             self.conv_pad_sizes.append([1 if i == 3 else 0 for i in krnl])
 
-
         if max_num_features is None:
             if self.conv_op == nn.Conv3d:
                 self.max_num_features = self.MAX_NUM_FILTERS_3D
@@ -266,8 +338,14 @@ class PlainConvUNetPlusPlusDecoder(nn.Module):
         max_num_stages = len(previous_stages) - 1  # we have one less as the first stage here is what comes after the
         # bottleneck
 
+
+        if not self.residual:
+            self.residual = [[False]*max_num_stages]*max_num_stages
+        if self.residual == True:
+            self.residual = [[True]*max_num_stages]*max_num_stages
+
+
         self.locs = []
-        self.td = []
         self.ups = []
         self.seg_outputs = []
         output_features = base_num_features
@@ -277,12 +355,11 @@ class PlainConvUNetPlusPlusDecoder(nn.Module):
             final_num_features = output_features
         else:
 
-            final_num_features = self.stage_output_features[-1] #On prend le dernier (au niveau du bottleneck)
+            final_num_features = self.stage_output_features[-1]  # On prend le dernier (au niveau du bottleneck)
 
-
-        for k in range (max_num_stages):
-            loc,up,features = self.create_nest(k, num_pool, final_num_features, num_blocks_per_stage,
-                                                                 basic_block, transpconv)
+        for k in range(max_num_stages):
+            loc, up, features = self.create_nest(k,previous, num_pool, final_num_features, num_blocks_per_stage,
+                                                transpconv)
 
             loc = nn.ModuleList(loc)
             up = nn.ModuleList(up)
@@ -290,34 +367,88 @@ class PlainConvUNetPlusPlusDecoder(nn.Module):
             self.ups.append([up])
 
             self.seg_outputs.append(self.props['conv_op'](self.loc[-1][-1].output_channels, num_classes,
-                                            1, 1, 0, 1, 1, seg_output_use_bias))
+                                                          1, 1, 0, 1, 1, seg_output_use_bias))
         self.seg_outputs = nn.ModuleList(self.seg_outputs)
-
-
-
 
     def forward(self, skips, gt=None, loss=None):
         # skips come from the encoder. They are sorted so that the bottleneck is last in the list
 
         seg_outputs = []
-        brins = [] #cette variable va stocker les valeurs des brins que l'on construit (elle va  remplacer les xi_j hardcodés)
+        brins = []  # cette variable va stocker les valeurs des brins que l'on construit (elle va  remplacer les xi_j hardcodés)
         inputs = []
-        for k in range (len(skips)-1):
-            #Cas spécial i = 0
-            brins.append([self.locs[k][0](torch.cat(skips[k],self.ups[k][0](skips[k+1])))])
-            for i in range(1,k + 1):
-                inputs = [skips[k], brins[k][i-1](skips[k + 1])] #toujours le skip de contexte et le brin du décodeur
-                for j in range(1,k+1):
-                    inputs.append(brins[k-j][i-j]) #on rajoute les connexions entre décodeurs
+        for k in range(len(skips) - 1):
+            # Cas spécial i = 0
+            brins.append([self.locs[k][0](torch.cat(skips[k], self.ups[k][0](skips[k + 1])))])
+            for i in range(1, k + 1):
+                inputs = [skips[k],
+                          brins[k][i - 1](skips[k + 1])]  # toujours le skip de contexte et le brin du décodeur
+                for j in range(1, k + 1):
+                    inputs.append(brins[k - j][i - j])  # on rajoute les connexions entre décodeurs
                 brins[k].append(self.locs[k][i](torch.cat(inputs)))
 
-            seg_outputs.append(self.final_nonlin(self.seg_outputs[-(k+1)](brins[k][-1])))
+            seg_outputs.append(self.final_nonlin(self.seg_outputs[-(k + 1)](brins[k][-1])))
 
         if self._deep_supervision and self.do_ds:
             return tuple([seg_outputs[-1]] + [i(j) for i, j in
                                               zip(list(self.upscale_logits_ops)[::-1], seg_outputs[:-1][::-1])])
         else:
             return seg_outputs[-1]
+
+    # now lets build the localization pathway BACK_UP
+    def create_nest(self, z,previous, num_pool, final_num_features, num_conv_per_stage, transpconv):
+        # print(final_num_features)
+        conv_blocks_localization = []
+        tu = []
+        i = 0
+        # seg_outputs = []
+        for u in range(z+1):
+            nfeatures_from_down = final_num_features
+            nfeatures_from_skip = previous.stages[-(2 + u)].output_channels # previous.stages[-1] is bottleneck, so start with -2
+            n_features_after_tu_and_concat = nfeatures_from_skip * (2 + u - z)
+            if i == 0:
+                unet_final_features = nfeatures_from_skip
+                i += 1
+            # the first conv reduces the number of features to match those of skip
+            # the following convs work on that number of features
+            # if not convolutional upsampling then the final conv reduces the num of features again
+            if u != num_pool - 1 and not self.convolutional_upsampling:
+                final_num_features = self.conv_blocks_context[-(3 + u)].output_channels
+            else:
+                final_num_features = nfeatures_from_skip
+
+            if not self.convolutional_upsampling:
+                tu.append(Upsample(scale_factor=self.pool_op_kernel_sizes[-(u + 1)], mode=self.upsample_mode))
+            else:
+                tu.append(transpconv(nfeatures_from_down, nfeatures_from_skip, self.pool_op_kernel_sizes[-(u + 1)],
+                                     self.pool_op_kernel_sizes[-(u + 1)], bias=False))
+
+            self.conv_kwargs['kernel_size'] = self.conv_kernel_sizes[- (u + 1)]
+            self.conv_kwargs['padding'] = self.conv_pad_sizes[- (u + 1)]
+            if self.residual[z][-z+u-1]: #Le but de -u-1 est que pour u = 0 on prenne le premier (-z-1) et u = z on prenne le dernier (-1)
+                basic_block = self.residual_block
+                conv_blocks_localization.append(nn.Sequential(
+                    ResidualLayer(n_features_after_tu_and_concat, nfeatures_from_skip, num_conv_per_stage - 1,
+                                      self.conv_op, self.conv_kwargs, self.norm_op, self.norm_op_kwargs,
+                                      self.dropout_op,
+                                      self.dropout_op_kwargs, self.nonlin, self.nonlin_kwargs, basic_block=basic_block),
+                    ResidualLayer(nfeatures_from_skip, final_num_features, 1, self.conv_op, self.conv_kwargs,
+                                      self.norm_op, self.norm_op_kwargs, self.dropout_op, self.dropout_op_kwargs,
+                                      self.nonlin, self.nonlin_kwargs, basic_block=basic_block)
+                ))
+            else:
+                basic_block = self.conv_basic_block
+                conv_blocks_localization.append(nn.Sequential(
+                    StackedConvLayers(n_features_after_tu_and_concat, nfeatures_from_skip, num_conv_per_stage - 1,
+                                      self.conv_op, self.conv_kwargs, self.norm_op, self.norm_op_kwargs,
+                                      self.dropout_op,
+                                      self.dropout_op_kwargs, self.nonlin, self.nonlin_kwargs, basic_block=basic_block),
+                    StackedConvLayers(nfeatures_from_skip, final_num_features, 1, self.conv_op, self.conv_kwargs,
+                                      self.norm_op, self.norm_op_kwargs, self.dropout_op, self.dropout_op_kwargs,
+                                      self.nonlin, self.nonlin_kwargs, basic_block=basic_block)
+                ))
+
+        return conv_blocks_localization, tu, unet_final_features
+
 
 
 
@@ -338,36 +469,39 @@ class PlainConvUNetPlusPlusDecoder(nn.Module):
         npool = len(pool_op_kernel_sizes) - 1
 
         current_shape = np.array(patch_size)
-        tmp = (num_blocks_per_stage_decoder[-1] + 1) * np.prod(current_shape) * base_num_features + num_classes * np.prod(current_shape)
+        tmp = (num_blocks_per_stage_decoder[-1] + 1) * np.prod(
+            current_shape) * base_num_features + num_classes * np.prod(current_shape)
 
         num_feat = base_num_features
-
-        for p in range(1, npool):
-            current_shape = current_shape / np.array(pool_op_kernel_sizes[p])
-            num_feat = min(num_feat * feat_map_mul_on_downscale, max_num_features)
-            num_convs = num_blocks_per_stage_decoder[-(p+1)] + 1
-            print(p, num_feat, num_convs, current_shape)
-            tmp += num_convs * np.prod(current_shape) * num_feat
+        for k in range(1,npool):
+            #On calcule pour chaque décodeur
+            #FIXME pas du tout sur de ca
+            for p in range(1, k):
+                current_shape = current_shape / np.array(pool_op_kernel_sizes[p])
+                num_feat = min(num_feat * feat_map_mul_on_downscale, max_num_features)
+                num_convs = num_blocks_per_stage_decoder[-(p + 1)] + 1
+                print(p, num_feat, num_convs, current_shape)
+                tmp += num_convs * np.prod(current_shape) * num_feat
 
         return tmp * batch_size
 
 
-class PlainConvUNet(SegmentationNetwork):
+class UNetPlusPlus(SegmentationNetwork):
     use_this_for_batch_size_computation_2D = 1167982592.0
     use_this_for_batch_size_computation_3D = 1152286720.0
 
     def __init__(self, input_channels, base_num_features, num_blocks_per_stage_encoder, feat_map_mul_on_downscale,
                  pool_op_kernel_sizes, conv_kernel_sizes, props, num_classes, num_blocks_per_stage_decoder,
                  deep_supervision=False, upscale_logits=False, max_features=512, initializer=None):
-        super(PlainConvUNet, self).__init__()
+        super(UNetPlusPlus, self).__init__()
         self.conv_op = props['conv_op']
         self.num_classes = num_classes
 
-        self.encoder = PlainConvUNetPlusPlusEncoder(input_channels, base_num_features, num_blocks_per_stage_encoder,
-                                            feat_map_mul_on_downscale, pool_op_kernel_sizes, conv_kernel_sizes,
-                                            props, default_return_skips=True, max_num_features=max_features)
-        self.decoder = PlainConvUNetPlusPlusDecoder(self.encoder, num_classes, num_blocks_per_stage_decoder, props,
-                                            deep_supervision, upscale_logits)
+        self.encoder = UNetPlusPlusEncoder(input_channels, base_num_features, num_blocks_per_stage_encoder,
+                                           feat_map_mul_on_downscale, pool_op_kernel_sizes, conv_kernel_sizes,
+                                           props, default_return_skips=True, max_num_features=max_features)
+        self.decoder = UNetPlusPlusDecoder(self.encoder, num_classes, num_blocks_per_stage_decoder, props,
+                                           deep_supervision, upscale_logits)
         if initializer is not None:
             self.apply(initializer)
 
@@ -379,14 +513,14 @@ class PlainConvUNet(SegmentationNetwork):
     def compute_approx_vram_consumption(patch_size, base_num_features, max_num_features,
                                         num_modalities, num_classes, pool_op_kernel_sizes, num_blocks_per_stage_encoder,
                                         num_blocks_per_stage_decoder, feat_map_mul_on_downscale, batch_size):
-        enc = PlainConvUNetPlusPlusEncoder.compute_approx_vram_consumption(patch_size, base_num_features, max_num_features,
-                                                                   num_modalities, pool_op_kernel_sizes,
-                                                                   num_blocks_per_stage_encoder,
-                                                                   feat_map_mul_on_downscale, batch_size)
-        dec = PlainConvUNetPlusPlusDecoder.compute_approx_vram_consumption(patch_size, base_num_features, max_num_features,
-                                                                   num_classes, pool_op_kernel_sizes,
-                                                                   num_blocks_per_stage_decoder,
-                                                                   feat_map_mul_on_downscale, batch_size)
+        enc = UNetPlusPlusEncoder.compute_approx_vram_consumption(patch_size, base_num_features, max_num_features,
+                                                                  num_modalities, pool_op_kernel_sizes,
+                                                                  num_blocks_per_stage_encoder,
+                                                                  feat_map_mul_on_downscale, batch_size)
+        dec = UNetPlusPlusDecoder.compute_approx_vram_consumption(patch_size, base_num_features, max_num_features,
+                                                                  num_classes, pool_op_kernel_sizes,
+                                                                  num_blocks_per_stage_decoder,
+                                                                  feat_map_mul_on_downscale, batch_size)
 
         return enc + dec
 
@@ -394,80 +528,41 @@ class PlainConvUNet(SegmentationNetwork):
     def compute_reference_for_vram_consumption_3d():
         patch_size = (160, 128, 128)
         pool_op_kernel_sizes = ((1, 1, 1),
-                            (2, 2, 2),
-                            (2, 2, 2),
-                            (2, 2, 2),
-                            (2, 2, 2),
-                            (2, 2, 2))
+                                (2, 2, 2),
+                                (2, 2, 2),
+                                (2, 2, 2),
+                                (2, 2, 2),
+                                (2, 2, 2))
         conv_per_stage_encoder = (2, 2, 2, 2, 2, 2)
         conv_per_stage_decoder = (2, 2, 2, 2, 2)
 
-        return PlainConvUNet.compute_approx_vram_consumption(patch_size, 32, 512, 4, 3, pool_op_kernel_sizes,
-                                                             conv_per_stage_encoder, conv_per_stage_decoder, 2, 2)
+        return UNetPlusPlus.compute_approx_vram_consumption(patch_size, 32, 512, 4, 3, pool_op_kernel_sizes,
+                                                    conv_per_stage_encoder, conv_per_stage_decoder, 2, 2)
 
     @staticmethod
     def compute_reference_for_vram_consumption_2d():
         patch_size = (256, 256)
         pool_op_kernel_sizes = (
-            (1, 1), # (256, 256)
-            (2, 2), # (128, 128)
-            (2, 2), # (64, 64)
-            (2, 2), # (32, 32)
-            (2, 2), # (16, 16)
-            (2, 2), # (8, 8)
+            (1, 1),  # (256, 256)
+            (2, 2),  # (128, 128)
+            (2, 2),  # (64, 64)
+            (2, 2),  # (32, 32)
+            (2, 2),  # (16, 16)
+            (2, 2),  # (8, 8)
             (2, 2)  # (4, 4)
         )
         conv_per_stage_encoder = (2, 2, 2, 2, 2, 2, 2)
         conv_per_stage_decoder = (2, 2, 2, 2, 2, 2)
 
-        return PlainConvUNet.compute_approx_vram_consumption(patch_size, 32, 512, 4, 3, pool_op_kernel_sizes,
-                                                             conv_per_stage_encoder, conv_per_stage_decoder, 2, 56)
+        return UNetPlusPlus.compute_approx_vram_consumption(patch_size, 32, 512, 4, 3, pool_op_kernel_sizes,
+                                                    conv_per_stage_encoder, conv_per_stage_decoder, 2, 56)
+
 
 
 if __name__ == "__main__":
-    conv_op_kernel_sizes = ((3, 3),
-                            (3, 3),
-                            (3, 3),
-                            (3, 3),
-                            (3, 3),
-                            (3, 3),
-                            (3, 3))
-    pool_op_kernel_sizes = ((1, 1),
-                            (2, 2),
-                            (2, 2),
-                            (2, 2),
-                            (2, 2),
-                            (2, 2),
-                            (2, 2))
-    patch_size = (256, 256)
-    batch_size = 56
-    unet = PlainConvUNet(4, 32, (2, 2, 2, 2, 2, 2, 2), 2, pool_op_kernel_sizes, conv_op_kernel_sizes,
-                         get_default_network_config(2, dropout_p=None), 4, (2, 2, 2, 2, 2, 2), False, False, max_features=512).cuda()
-    optimizer = SGD(unet.parameters(), lr=0.1, momentum=0.95)
-
-    unet.compute_reference_for_vram_consumption_3d()
-    unet.compute_reference_for_vram_consumption_2d()
-
-    dummy_input = torch.rand((batch_size, 4, *patch_size)).cuda()
-    dummy_gt = (torch.rand((batch_size, 1, *patch_size)) * 4).round().clamp_(0, 3).cuda().long()
-
-    optimizer.zero_grad()
-    skips = unet.encoder(dummy_input)
-    print([i.shape for i in skips])
-    loss = DC_and_CE_loss({'batch_dice': True, 'smooth': 1e-5, 'smooth_in_nom': True,
-                    'do_bg': False, 'rebalance_weights': None, 'background_weight': 1}, {})
-    output = unet.decoder(skips)
-
-    l = loss(output, dummy_gt)
-    l.backward()
-
-    optimizer.step()
-
-    import hiddenlayer as hl
-    g = hl.build_graph(unet, dummy_input)
-    g.save("/home/fabian/test.pdf")
-
-    """conv_op_kernel_sizes = ((3, 3, 3),
+    #TODO Voir comment c'est utilisé dans unetpp
+    conv_op_kernel_sizes = ((3, 3, 3),
+                            (3, 3, 3),
                             (3, 3, 3),
                             (3, 3, 3),
                             (3, 3, 3),
@@ -478,24 +573,27 @@ if __name__ == "__main__":
                             (2, 2, 2),
                             (2, 2, 2),
                             (2, 2, 2),
+                            (2, 2, 2),
                             (2, 2, 2))
-    patch_size = (160, 128, 128)
-    unet = PlainConvUNet(4, 32, (2, 2, 2, 2, 2, 2), 2, pool_op_kernel_sizes, conv_op_kernel_sizes,
-                         get_default_network_config(3, dropout_p=None), 4, (2, 2, 2, 2, 2), False, False, max_features=512).cuda()
-    optimizer = SGD(unet.parameters(), lr=0.1, momentum=0.95)
+    patch_size = (256, 256)
+    batch_size = 56
+    unetPlusPlus = UNetPlusPlus(4, 32, (2, 2, 2, 2, 2, 2, 2), 2, pool_op_kernel_sizes, conv_op_kernel_sizes,
+                get_default_network_config(2, dropout_p=None), 4, (2, 2, 2, 2, 2, 2), False, False,
+                max_features=512).cuda()
+    optimizer = SGD(unetPlusPlus.parameters(), lr=0.1, momentum=0.95)
 
-    unet.compute_reference_for_vram_consumption_3d()
-    unet.compute_reference_for_vram_consumption_2d()
+    unetPlusPlus.compute_reference_for_vram_consumption_3d()
+    unetPlusPlus.compute_reference_for_vram_consumption_2d()
 
-    dummy_input = torch.rand((2, 4, *patch_size)).cuda()
-    dummy_gt = (torch.rand((2, 1, *patch_size)) * 4).round().clamp_(0, 3).cuda().long()
+    dummy_input = torch.rand((batch_size, 4, *patch_size)).cuda()
+    dummy_gt = (torch.rand((batch_size, 1, *patch_size)) * 4).round().clamp_(0, 3).cuda().long()
 
     optimizer.zero_grad()
-    skips = unet.encoder(dummy_input)
+    skips = unetPlusPlus.encoder(dummy_input)
     print([i.shape for i in skips])
     loss = DC_and_CE_loss({'batch_dice': True, 'smooth': 1e-5, 'smooth_in_nom': True,
-                    'do_bg': False, 'rebalance_weights': None, 'background_weight': 1}, {})
-    output = unet.decoder(skips)
+                           'do_bg': False, 'rebalance_weights': None, 'background_weight': 1}, {})
+    output = unetPlusPlus.decoder(skips)
 
     l = loss(output, dummy_gt)
     l.backward()
@@ -503,5 +601,6 @@ if __name__ == "__main__":
     optimizer.step()
 
     import hiddenlayer as hl
-    g = hl.build_graph(unet, dummy_input)
-    g.save("/home/fabian/test.pdf")"""
+
+    g = hl.build_graph(unetPlusPlus, dummy_input)
+    g.save("/home/fabian/test.pdf")

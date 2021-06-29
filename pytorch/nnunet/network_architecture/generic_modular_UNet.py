@@ -22,6 +22,7 @@ from torch import nn
 import numpy as np
 from torch.optim import SGD
 
+
 """
 The idea behind this modular U-net ist that we decouple encoder and decoder and thus make things a) a lot more easy to 
 combine and b) enable easy swapping between segmentation or classification mode of the same architecture

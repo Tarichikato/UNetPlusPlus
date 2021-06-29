@@ -36,6 +36,7 @@ from nnunet.training.learning_rate.poly_lr import poly_lr
 from batchgenerators.utilities.file_and_folder_operations import *
 
 
+
 class nnUNetPlusPlusTrainerV2(nnUNetTrainer):
     """
     Info for Fabian: same as internal nnUNetTrainerV2_2
@@ -96,7 +97,8 @@ class nnUNetPlusPlusTrainerV2(nnUNetTrainer):
             #self.ds_loss_weights = weights
             self.ds_loss_weights = None
             # now wrap the loss
-            self.loss = MultipleOutputLoss2(self.loss, self.ds_loss_weights)
+            #Modif by PL (Visualiser les loss de chaque loc)
+            self.loss= MultipleOutputLoss2(self.loss, self.ds_loss_weights)
             ################# END ###################
 
             self.folder_with_preprocessed_data = join(self.dataset_directory, self.plans['data_identifier'] +

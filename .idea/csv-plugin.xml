@@ -3,7 +3,21 @@
   <component name="CsvFileAttributes">
     <option name="attributeMap">
       <map>
+        <entry key="C:\Users\pierr\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.8_qbz5n2kfra8p0\LocalCache\local-packages\Python38\site-packages\nnunet\training\network_training\nnUNetTrainerV2_DDP.py">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
         <entry key="\pytorch\nnunet\network_architecture\generic_UNetPlusPlus.py">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="\pytorch\nnunet\network_architecture\generic_modular_UNet.py">
           <value>
             <Attribute>
               <option name="separator" value="," />
@@ -18,6 +32,34 @@
           </value>
         </entry>
         <entry key="\pytorch\nnunet\network_architecture\generic_modular_UNetPlusPlus_V2.py">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="\pytorch\nnunet\network_architecture\generic_modular_VNet.py">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="\pytorch\nnunet\training\network_training\nnUNetPlusPlusTrainerV2.py">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="\pytorch\nnunet\training\network_training\nnUNetTrainer.py">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="\pytorch\nnunet\training\network_training\nnUNetTrainerV2_DDP.py">
           <value>
             <Attribute>
               <option name="separator" value="," />
