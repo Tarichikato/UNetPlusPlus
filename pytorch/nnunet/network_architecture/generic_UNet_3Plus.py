@@ -2,36 +2,97 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from layers import unetConv2
+from layers import unetConv2, unetConv3
 from init_weights import init_weights
+import numpy as np
 '''
-    UNet 3+
+    UNet 3Plus
 '''
 class UNet_3Plus(nn.Module):
+    DEFAULT_BATCH_SIZE_3D = 2
+    DEFAULT_PATCH_SIZE_3D = (64, 192, 160)
+    SPACING_FACTOR_BETWEEN_STAGES = 2
+    BASE_NUM_FEATURES_3D = 30
+    MAX_NUMPOOL_3D = 999
+    MAX_NUM_FILTERS_3D = 320
 
-    def __init__(self, in_channels=3, n_classes=1, feature_scale=4, is_deconv=True, is_batchnorm=True):
+    DEFAULT_PATCH_SIZE_2D = (256, 256)
+    BASE_NUM_FEATURES_2D = 30
+    DEFAULT_BATCH_SIZE_2D = 50
+    MAX_NUMPOOL_2D = 999
+    MAX_FILTERS_2D = 480
+
+    use_this_for_batch_size_computation_2D = 19739648
+    use_this_for_batch_size_computation_3D = 520000000  # 505789440
+
+    def __init__(self, in_channels, n_classes, feature_scale=4, is_deconv=True, is_batchnorm=True,
+                 #Modifications by PL (pour se rappeler des arguments ajoutés)
+                 norm_op_kwargs=None,
+                 dropout_op=nn.Dropout2d, dropout_op_kwargs=None,
+                 nonlin=nn.LeakyReLU, nonlin_kwargs=None,pool_op_kernel_sizes=None,conv_kernel_sizes=None,max_num_features=None):
+
         super(UNet_3Plus, self).__init__()
+
         self.is_deconv = is_deconv
         self.in_channels = in_channels
         self.is_batchnorm = is_batchnorm
         self.feature_scale = feature_scale
 
+        if nonlin_kwargs is None:
+            nonlin_kwargs = {'negative_slope': 1e-2, 'inplace': True}
+        if dropout_op_kwargs is None:
+            dropout_op_kwargs = {'p': 0.5, 'inplace': True}
+        if norm_op_kwargs is None:
+            norm_op_kwargs = {'eps': 1e-5, 'affine': True, 'momentum': 0.1}
+
+        self.conv_kwargs = {'stride': 1, 'dilation': 1, 'bias': True}
+
+        self.nonlin = nonlin
+        self.nonlin_kwargs = nonlin_kwargs
+        self.dropout_op_kwargs = dropout_op_kwargs
+        self.norm_op_kwargs = norm_op_kwargs
+        self.dropout_op = dropout_op
+        self.num_classes = n_classes
+
+        #Un peu shlag j'en conviens volontier mais on verra ca après
         filters = [64, 128, 256, 512, 1024]
+        num_pool = len(filters) - 1
+
+
+
+
+        pool_op_kernel_sizes = [(2, 2, 2)] * num_pool
+
+        #Pas utilisé
+        self.input_shape_must_be_divisible_by = np.prod(pool_op_kernel_sizes, 0, dtype=np.int64)
+
+
+
+        self.conv_pad_sizes = []
+        for krnl in self.conv_kernel_sizes:
+            self.conv_pad_sizes.append([1 if i == 3 else 0 for i in krnl])
+
+
+        self.max_num_features = self.MAX_NUM_FILTERS_3D
+
+
+
+
 
         ## -------------Encoder--------------
-        self.conv1 = unetConv2(self.in_channels, filters[0], self.is_batchnorm)
-        self.maxpool1 = nn.MaxPool2d(kernel_size=2)
+        self.conv1 = unetConv3(self.in_channels, filters[0], self.is_batchnorm)
+        self.maxpool1 = nn.MaxPool3d(kernel_size=2)
 
-        self.conv2 = unetConv2(filters[0], filters[1], self.is_batchnorm)
-        self.maxpool2 = nn.MaxPool2d(kernel_size=2)
+        self.conv2 = unetConv3(filters[0], filters[1], self.is_batchnorm)
+        self.maxpool2 = nn.MaxPool3d(kernel_size=2)
 
-        self.conv3 = unetConv2(filters[1], filters[2], self.is_batchnorm)
-        self.maxpool3 = nn.MaxPool2d(kernel_size=2)
+        self.conv3 = unetConv3(filters[1], filters[2], self.is_batchnorm)
+        self.maxpool3 = nn.MaxPool3d(kernel_size=2)
 
-        self.conv4 = unetConv2(filters[2], filters[3], self.is_batchnorm)
-        self.maxpool4 = nn.MaxPool2d(kernel_size=2)
+        self.conv4 = unetConv3(filters[2], filters[3], self.is_batchnorm)
+        self.maxpool4 = nn.MaxPool3d(kernel_size=2)
 
-        self.conv5 = unetConv2(filters[3], filters[4], self.is_batchnorm)
+        self.conv5 = unetConv3(filters[3], filters[4], self.is_batchnorm)
 
         ## -------------Decoder--------------
         self.CatChannels = filters[0]
@@ -40,152 +101,152 @@ class UNet_3Plus(nn.Module):
 
         '''stage 4d'''
         # h1->320*320, hd4->40*40, Pooling 8 times
-        self.h1_PT_hd4 = nn.MaxPool2d(8, 8, ceil_mode=True)
-        self.h1_PT_hd4_conv = nn.Conv2d(filters[0], self.CatChannels, 3, padding=1)
-        self.h1_PT_hd4_bn = nn.BatchNorm2d(self.CatChannels)
+        self.h1_PT_hd4 = nn.MaxPool3d(8, 8, ceil_mode=True)
+        self.h1_PT_hd4_conv = nn.Conv3d(filters[0], self.CatChannels, 3, padding=1)
+        self.h1_PT_hd4_bn = nn.BatchNorm3d(self.CatChannels)
         self.h1_PT_hd4_relu = nn.ReLU(inplace=True)
 
         # h2->160*160, hd4->40*40, Pooling 4 times
-        self.h2_PT_hd4 = nn.MaxPool2d(4, 4, ceil_mode=True)
-        self.h2_PT_hd4_conv = nn.Conv2d(filters[1], self.CatChannels, 3, padding=1)
-        self.h2_PT_hd4_bn = nn.BatchNorm2d(self.CatChannels)
+        self.h2_PT_hd4 = nn.MaxPool3d(4, 4, ceil_mode=True)
+        self.h2_PT_hd4_conv = nn.Conv3d(filters[1], self.CatChannels, 3, padding=1)
+        self.h2_PT_hd4_bn = nn.BatchNorm3d(self.CatChannels)
         self.h2_PT_hd4_relu = nn.ReLU(inplace=True)
 
         # h3->80*80, hd4->40*40, Pooling 2 times
-        self.h3_PT_hd4 = nn.MaxPool2d(2, 2, ceil_mode=True)
-        self.h3_PT_hd4_conv = nn.Conv2d(filters[2], self.CatChannels, 3, padding=1)
-        self.h3_PT_hd4_bn = nn.BatchNorm2d(self.CatChannels)
+        self.h3_PT_hd4 = nn.MaxPool3d(2, 2, ceil_mode=True)
+        self.h3_PT_hd4_conv = nn.Conv3d(filters[2], self.CatChannels, 3, padding=1)
+        self.h3_PT_hd4_bn = nn.BatchNorm3d(self.CatChannels)
         self.h3_PT_hd4_relu = nn.ReLU(inplace=True)
 
         # h4->40*40, hd4->40*40, Concatenation
-        self.h4_Cat_hd4_conv = nn.Conv2d(filters[3], self.CatChannels, 3, padding=1)
-        self.h4_Cat_hd4_bn = nn.BatchNorm2d(self.CatChannels)
+        self.h4_Cat_hd4_conv = nn.Conv3d(filters[3], self.CatChannels, 3, padding=1)
+        self.h4_Cat_hd4_bn = nn.BatchNorm3d(self.CatChannels)
         self.h4_Cat_hd4_relu = nn.ReLU(inplace=True)
 
         # hd5->20*20, hd4->40*40, Upsample 2 times
-        self.hd5_UT_hd4 = nn.Upsample(scale_factor=2, mode='bilinear')  # 14*14
-        self.hd5_UT_hd4_conv = nn.Conv2d(filters[4], self.CatChannels, 3, padding=1)
-        self.hd5_UT_hd4_bn = nn.BatchNorm2d(self.CatChannels)
+        self.hd5_UT_hd4 = nn.Upsample(scale_factor=2, mode='trilinear')  # 14*14
+        self.hd5_UT_hd4_conv = nn.Conv3d(filters[4], self.CatChannels, 3, padding=1)
+        self.hd5_UT_hd4_bn = nn.BatchNorm3d(self.CatChannels)
         self.hd5_UT_hd4_relu = nn.ReLU(inplace=True)
 
         # fusion(h1_PT_hd4, h2_PT_hd4, h3_PT_hd4, h4_Cat_hd4, hd5_UT_hd4)
-        self.conv4d_1 = nn.Conv2d(self.UpChannels, self.UpChannels, 3, padding=1)  # 16
-        self.bn4d_1 = nn.BatchNorm2d(self.UpChannels)
+        self.conv4d_1 = nn.Conv3d(self.UpChannels, self.UpChannels, 3, padding=1)  # 16
+        self.bn4d_1 = nn.BatchNorm3d(self.UpChannels)
         self.relu4d_1 = nn.ReLU(inplace=True)
 
         '''stage 3d'''
         # h1->320*320, hd3->80*80, Pooling 4 times
-        self.h1_PT_hd3 = nn.MaxPool2d(4, 4, ceil_mode=True)
-        self.h1_PT_hd3_conv = nn.Conv2d(filters[0], self.CatChannels, 3, padding=1)
-        self.h1_PT_hd3_bn = nn.BatchNorm2d(self.CatChannels)
+        self.h1_PT_hd3 = nn.MaxPool3d(4, 4, ceil_mode=True)
+        self.h1_PT_hd3_conv = nn.Conv3d(filters[0], self.CatChannels, 3, padding=1)
+        self.h1_PT_hd3_bn = nn.BatchNorm3d(self.CatChannels)
         self.h1_PT_hd3_relu = nn.ReLU(inplace=True)
 
         # h2->160*160, hd3->80*80, Pooling 2 times
         self.h2_PT_hd3 = nn.MaxPool2d(2, 2, ceil_mode=True)
-        self.h2_PT_hd3_conv = nn.Conv2d(filters[1], self.CatChannels, 3, padding=1)
-        self.h2_PT_hd3_bn = nn.BatchNorm2d(self.CatChannels)
+        self.h2_PT_hd3_conv = nn.Conv3d(filters[1], self.CatChannels, 3, padding=1)
+        self.h2_PT_hd3_bn = nn.BatchNorm3d(self.CatChannels)
         self.h2_PT_hd3_relu = nn.ReLU(inplace=True)
 
         # h3->80*80, hd3->80*80, Concatenation
-        self.h3_Cat_hd3_conv = nn.Conv2d(filters[2], self.CatChannels, 3, padding=1)
-        self.h3_Cat_hd3_bn = nn.BatchNorm2d(self.CatChannels)
+        self.h3_Cat_hd3_conv = nn.Conv3d(filters[2], self.CatChannels, 3, padding=1)
+        self.h3_Cat_hd3_bn = nn.BatchNorm3d(self.CatChannels)
         self.h3_Cat_hd3_relu = nn.ReLU(inplace=True)
 
         # hd4->40*40, hd4->80*80, Upsample 2 times
-        self.hd4_UT_hd3 = nn.Upsample(scale_factor=2, mode='bilinear')  # 14*14
-        self.hd4_UT_hd3_conv = nn.Conv2d(self.UpChannels, self.CatChannels, 3, padding=1)
-        self.hd4_UT_hd3_bn = nn.BatchNorm2d(self.CatChannels)
+        self.hd4_UT_hd3 = nn.Upsample(scale_factor=2, mode='trilinear')  # 14*14
+        self.hd4_UT_hd3_conv = nn.Conv3d(self.UpChannels, self.CatChannels, 3, padding=1)
+        self.hd4_UT_hd3_bn = nn.BatchNorm3d(self.CatChannels)
         self.hd4_UT_hd3_relu = nn.ReLU(inplace=True)
 
         # hd5->20*20, hd4->80*80, Upsample 4 times
-        self.hd5_UT_hd3 = nn.Upsample(scale_factor=4, mode='bilinear')  # 14*14
-        self.hd5_UT_hd3_conv = nn.Conv2d(filters[4], self.CatChannels, 3, padding=1)
-        self.hd5_UT_hd3_bn = nn.BatchNorm2d(self.CatChannels)
+        self.hd5_UT_hd3 = nn.Upsample(scale_factor=4, mode='trilinear')  # 14*14
+        self.hd5_UT_hd3_conv = nn.Conv3d(filters[4], self.CatChannels, 3, padding=1)
+        self.hd5_UT_hd3_bn = nn.BatchNorm3d(self.CatChannels)
         self.hd5_UT_hd3_relu = nn.ReLU(inplace=True)
 
         # fusion(h1_PT_hd3, h2_PT_hd3, h3_Cat_hd3, hd4_UT_hd3, hd5_UT_hd3)
-        self.conv3d_1 = nn.Conv2d(self.UpChannels, self.UpChannels, 3, padding=1)  # 16
-        self.bn3d_1 = nn.BatchNorm2d(self.UpChannels)
+        self.conv3d_1 = nn.Conv3d(self.UpChannels, self.UpChannels, 3, padding=1)  # 16
+        self.bn3d_1 = nn.BatchNorm3d(self.UpChannels)
         self.relu3d_1 = nn.ReLU(inplace=True)
 
         '''stage 2d '''
         # h1->320*320, hd2->160*160, Pooling 2 times
-        self.h1_PT_hd2 = nn.MaxPool2d(2, 2, ceil_mode=True)
-        self.h1_PT_hd2_conv = nn.Conv2d(filters[0], self.CatChannels, 3, padding=1)
-        self.h1_PT_hd2_bn = nn.BatchNorm2d(self.CatChannels)
+        self.h1_PT_hd2 = nn.MaxPool3d(2, 2, ceil_mode=True)
+        self.h1_PT_hd2_conv = nn.Conv3d(filters[0], self.CatChannels, 3, padding=1)
+        self.h1_PT_hd2_bn = nn.BatchNorm3d(self.CatChannels)
         self.h1_PT_hd2_relu = nn.ReLU(inplace=True)
 
         # h2->160*160, hd2->160*160, Concatenation
-        self.h2_Cat_hd2_conv = nn.Conv2d(filters[1], self.CatChannels, 3, padding=1)
-        self.h2_Cat_hd2_bn = nn.BatchNorm2d(self.CatChannels)
+        self.h2_Cat_hd2_conv = nn.Conv3d(filters[1], self.CatChannels, 3, padding=1)
+        self.h2_Cat_hd2_bn = nn.BatchNorm3d(self.CatChannels)
         self.h2_Cat_hd2_relu = nn.ReLU(inplace=True)
 
         # hd3->80*80, hd2->160*160, Upsample 2 times
-        self.hd3_UT_hd2 = nn.Upsample(scale_factor=2, mode='bilinear')  # 14*14
-        self.hd3_UT_hd2_conv = nn.Conv2d(self.UpChannels, self.CatChannels, 3, padding=1)
-        self.hd3_UT_hd2_bn = nn.BatchNorm2d(self.CatChannels)
+        self.hd3_UT_hd2 = nn.Upsample(scale_factor=2, mode='trilinear')  # 14*14
+        self.hd3_UT_hd2_conv = nn.Conv3d(self.UpChannels, self.CatChannels, 3, padding=1)
+        self.hd3_UT_hd2_bn = nn.BatchNorm3d(self.CatChannels)
         self.hd3_UT_hd2_relu = nn.ReLU(inplace=True)
 
         # hd4->40*40, hd2->160*160, Upsample 4 times
-        self.hd4_UT_hd2 = nn.Upsample(scale_factor=4, mode='bilinear')  # 14*14
-        self.hd4_UT_hd2_conv = nn.Conv2d(self.UpChannels, self.CatChannels, 3, padding=1)
-        self.hd4_UT_hd2_bn = nn.BatchNorm2d(self.CatChannels)
+        self.hd4_UT_hd2 = nn.Upsample(scale_factor=4, mode='trilinear')  # 14*14
+        self.hd4_UT_hd2_conv = nn.Conv3d(self.UpChannels, self.CatChannels, 3, padding=1)
+        self.hd4_UT_hd2_bn = nn.BatchNorm3d(self.CatChannels)
         self.hd4_UT_hd2_relu = nn.ReLU(inplace=True)
 
         # hd5->20*20, hd2->160*160, Upsample 8 times
-        self.hd5_UT_hd2 = nn.Upsample(scale_factor=8, mode='bilinear')  # 14*14
-        self.hd5_UT_hd2_conv = nn.Conv2d(filters[4], self.CatChannels, 3, padding=1)
-        self.hd5_UT_hd2_bn = nn.BatchNorm2d(self.CatChannels)
+        self.hd5_UT_hd2 = nn.Upsample(scale_factor=8, mode='trilinear')  # 14*14
+        self.hd5_UT_hd2_conv = nn.Conv3d(filters[4], self.CatChannels, 3, padding=1)
+        self.hd5_UT_hd2_bn = nn.BatchNorm3d(self.CatChannels)
         self.hd5_UT_hd2_relu = nn.ReLU(inplace=True)
 
         # fusion(h1_PT_hd2, h2_Cat_hd2, hd3_UT_hd2, hd4_UT_hd2, hd5_UT_hd2)
-        self.conv2d_1 = nn.Conv2d(self.UpChannels, self.UpChannels, 3, padding=1)  # 16
-        self.bn2d_1 = nn.BatchNorm2d(self.UpChannels)
+        self.conv2d_1 = nn.Conv3d(self.UpChannels, self.UpChannels, 3, padding=1)  # 16
+        self.bn2d_1 = nn.BatchNorm3d(self.UpChannels)
         self.relu2d_1 = nn.ReLU(inplace=True)
 
         '''stage 1d'''
         # h1->320*320, hd1->320*320, Concatenation
-        self.h1_Cat_hd1_conv = nn.Conv2d(filters[0], self.CatChannels, 3, padding=1)
-        self.h1_Cat_hd1_bn = nn.BatchNorm2d(self.CatChannels)
+        self.h1_Cat_hd1_conv = nn.Conv3d(filters[0], self.CatChannels, 3, padding=1)
+        self.h1_Cat_hd1_bn = nn.BatchNorm3d(self.CatChannels)
         self.h1_Cat_hd1_relu = nn.ReLU(inplace=True)
 
         # hd2->160*160, hd1->320*320, Upsample 2 times
-        self.hd2_UT_hd1 = nn.Upsample(scale_factor=2, mode='bilinear')  # 14*14
-        self.hd2_UT_hd1_conv = nn.Conv2d(self.UpChannels, self.CatChannels, 3, padding=1)
-        self.hd2_UT_hd1_bn = nn.BatchNorm2d(self.CatChannels)
+        self.hd2_UT_hd1 = nn.Upsample(scale_factor=2, mode='trilinear')  # 14*14
+        self.hd2_UT_hd1_conv = nn.Conv3d(self.UpChannels, self.CatChannels, 3, padding=1)
+        self.hd2_UT_hd1_bn = nn.BatchNorm3d(self.CatChannels)
         self.hd2_UT_hd1_relu = nn.ReLU(inplace=True)
 
         # hd3->80*80, hd1->320*320, Upsample 4 times
-        self.hd3_UT_hd1 = nn.Upsample(scale_factor=4, mode='bilinear')  # 14*14
-        self.hd3_UT_hd1_conv = nn.Conv2d(self.UpChannels, self.CatChannels, 3, padding=1)
-        self.hd3_UT_hd1_bn = nn.BatchNorm2d(self.CatChannels)
+        self.hd3_UT_hd1 = nn.Upsample(scale_factor=4, mode='trilinear')  # 14*14
+        self.hd3_UT_hd1_conv = nn.Conv3d(self.UpChannels, self.CatChannels, 3, padding=1)
+        self.hd3_UT_hd1_bn = nn.BatchNorm3d(self.CatChannels)
         self.hd3_UT_hd1_relu = nn.ReLU(inplace=True)
 
         # hd4->40*40, hd1->320*320, Upsample 8 times
-        self.hd4_UT_hd1 = nn.Upsample(scale_factor=8, mode='bilinear')  # 14*14
-        self.hd4_UT_hd1_conv = nn.Conv2d(self.UpChannels, self.CatChannels, 3, padding=1)
-        self.hd4_UT_hd1_bn = nn.BatchNorm2d(self.CatChannels)
+        self.hd4_UT_hd1 = nn.Upsample(scale_factor=8, mode='trilinear')  # 14*14
+        self.hd4_UT_hd1_conv = nn.Conv3d(self.UpChannels, self.CatChannels, 3, padding=1)
+        self.hd4_UT_hd1_bn = nn.BatchNorm3d(self.CatChannels)
         self.hd4_UT_hd1_relu = nn.ReLU(inplace=True)
 
         # hd5->20*20, hd1->320*320, Upsample 16 times
-        self.hd5_UT_hd1 = nn.Upsample(scale_factor=16, mode='bilinear')  # 14*14
-        self.hd5_UT_hd1_conv = nn.Conv2d(filters[4], self.CatChannels, 3, padding=1)
-        self.hd5_UT_hd1_bn = nn.BatchNorm2d(self.CatChannels)
+        self.hd5_UT_hd1 = nn.Upsample(scale_factor=16, mode='trilinear')  # 14*14
+        self.hd5_UT_hd1_conv = nn.Conv3d(filters[4], self.CatChannels, 3, padding=1)
+        self.hd5_UT_hd1_bn = nn.BatchNorm3d(self.CatChannels)
         self.hd5_UT_hd1_relu = nn.ReLU(inplace=True)
 
         # fusion(h1_Cat_hd1, hd2_UT_hd1, hd3_UT_hd1, hd4_UT_hd1, hd5_UT_hd1)
-        self.conv1d_1 = nn.Conv2d(self.UpChannels, self.UpChannels, 3, padding=1)  # 16
-        self.bn1d_1 = nn.BatchNorm2d(self.UpChannels)
+        self.conv1d_1 = nn.Conv3d(self.UpChannels, self.UpChannels, 3, padding=1)  # 16
+        self.bn1d_1 = nn.BatchNorm3d(self.UpChannels)
         self.relu1d_1 = nn.ReLU(inplace=True)
 
         # output
-        self.outconv1 = nn.Conv2d(self.UpChannels, n_classes, 3, padding=1)
+        self.outconv1 = nn.Conv3d(self.UpChannels, self.num_classes, 3, padding=1)
 
         # initialise weights
         for m in self.modules():
-            if isinstance(m, nn.Conv2d):
+            if isinstance(m, nn.Conv3d):
                 init_weights(m, init_type='kaiming')
-            elif isinstance(m, nn.BatchNorm2d):
+            elif isinstance(m, nn.BatchNorm3d):
                 init_weights(m, init_type='kaiming')
 
     def forward(self, inputs):
@@ -237,11 +298,11 @@ class UNet_3Plus(nn.Module):
         hd1 = self.relu1d_1(self.bn1d_1(self.conv1d_1(
             torch.cat((h1_Cat_hd1, hd2_UT_hd1, hd3_UT_hd1, hd4_UT_hd1, hd5_UT_hd1), 1)))) # hd1->320*320*UpChannels
 
-        d1 = self.outconv1(hd1)  # d1->320*320*n_classes
+        d1 = self.outconv1(hd1)  # d1->320*320*self.num_classes
         return F.sigmoid(d1)
     
 '''
-    UNet 3+ with deep supervision
+    UNet 3Plus with deep supervision
 '''
 class UNet_3Plus_DeepSup(nn.Module):
     def __init__(self, in_channels=3, n_classes=1, feature_scale=4, is_deconv=True, is_batchnorm=True):
@@ -497,9 +558,9 @@ class UNet_3Plus_DeepSup(nn.Module):
 
         d1 = self.outconv1(hd1) # 256
         return F.sigmoid(d1), F.sigmoid(d2), F.sigmoid(d3), F.sigmoid(d4), F.sigmoid(d5)
-    
+
 '''
-    UNet 3+ with deep supervision and class-guided module
+    UNet 3Plus with deep supervision and class-guided module
 '''
 class UNet_3Plus_DeepSup_CGM(nn.Module):
 
